@@ -108,6 +108,27 @@ Notes:
 - Tests are under `./test` and configured by `pytest.ini`.
 - Integration tests auto-skip when required checkpoints/sample data/GPU are missing.
 
+## ISLES-2022 Training
+
+The training launcher `scripts/train_isles2022_segmentation.sh` automatically reads project-root `.env` if present.
+
+```bash
+cp .env.example .env
+# edit .env as needed (dataset path, gpu id, output dir, log dir, etc.)
+```
+
+Start training:
+
+```bash
+bash scripts/train_isles2022_segmentation.sh
+```
+
+Command-line arguments still override `.env`:
+
+```bash
+bash scripts/train_isles2022_segmentation.sh /data/datasets/ISLES-2022 0
+```
+
 
 
 
@@ -157,4 +178,3 @@ Mass General Brigham.
 
 For commercial licensing inquiries, please contact the
 Mass General Brigham Office of Technology Development. See [LICENSE](LICENSE) for details.
-
