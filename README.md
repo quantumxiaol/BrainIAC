@@ -8,40 +8,105 @@
 
 BrainIAC (Brain Imaging Adaptive Core) is vision based foundation model for generalized structural Brain MRI analysis. This repository provides the BrainIAC and downstream model checkpoints, with training/inference pipeline across all downstream tasks. Checkout the [Paper]([https://pmc.ncbi.nlm.nih.gov/articles/PMC11643205/](https://www.nature.com/articles/s41593-026-02202-6))
 
-## Env
-```bash
-# (可选) 国内建议使用清华 TUNA 镜像。
-uv lock --default-index "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-uv sync --default-index "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
-source .venv/bin/activate
-```
-
 ## Installation
 
 ### Prerequisites
-- Python 3.9+
-- CUDA 11.0+ 
+- Python 3.9 - 3.12
+- CUDA 11.0+ (if running on GPU)
 
-
-
-### Setup Environment
+### Option A (Recommended): uv
 
 ```bash
-# Clone the repository
+# Clone
 git clone https://github.com/YourUsername/BrainIAC_V2.git
 cd BrainIAC
 
-# Create conda environment
+# (Optional) Use TUNA mirror in mainland China
+uv lock --default-index "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+uv sync --extra test --default-index "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
-# Create conda environment
-conda create -n brainiac python=3.9
+# Or without mirror
+# uv sync --extra test
+
+source .venv/bin/activate
+```
+
+### Option B: conda + pip
+
+```bash
+git clone https://github.com/YourUsername/BrainIAC_V2.git
+cd BrainIAC
+
+conda create -n brainiac python=3.10
 conda activate brainiac
+
+# Use pinned runtime deps from requirements.txt (important for MONAI compatibility)
 pip install -r requirements.txt
+
+# Install this repo in editable mode without upgrading pinned deps
+pip install -e . --no-deps
+
+# Test dependency
+pip install pytest
+```
+
+### Verify Runtime Versions
+
+```bash
+python - <<'PY'
+import monai, torch, pytorch_lightning
+print("monai", monai.__version__)  # expected: 1.3.2
+print("torch", torch.__version__)
+print("pl", pytorch_lightning.__version__)
+PY
 ```
 
 ## Model Checkpoints
 
-Download the BrainIAC weights and downstream model [checkpoints](https://www.dropbox.com/scl/fo/i51xt63roognvt7vuslbl/AG99uZljziHss5zJz4HiFis?rlkey=9w55le6tslwxlfz6c0viylmjb&st=b9cnvwh8&dl=0) and place them in `./src/checkpoints/`:
+Download and extract checkpoints into `./src/checkpoints/`:
+
+```bash
+python download_checkpoints.py
+```
+
+If your runtime environment cannot access the internet, download on another machine and then:
+
+```bash
+python download_checkpoints.py --archive /path/to/checkpoints.zip --output-dir ./src/checkpoints
+```
+
+Some inference scripts use these default names:
+
+```bash
+cd src/checkpoints
+ln -sf vit_mci.ckpt mci.ckpt
+ln -sf os_model.pt os.ckpt
+ln -sf sequence_classifcation.ckpt multiclass.ckpt
+```
+
+## Testing
+
+Basic tests (fast, no heavy model inference):
+
+```bash
+pytest -q -m "not integration"
+```
+
+Integration tests:
+
+```bash
+pytest -q -m integration
+```
+
+GPU integration tests only:
+
+```bash
+pytest -q -m "integration and gpu"
+```
+
+Notes:
+- Tests are under `./test` and configured by `pytest.ini`.
+- Integration tests auto-skip when required checkpoints/sample data/GPU are missing.
 
 
 
@@ -92,5 +157,4 @@ Mass General Brigham.
 
 For commercial licensing inquiries, please contact the
 Mass General Brigham Office of Technology Development. See [LICENSE](LICENSE) for details.
-
 
