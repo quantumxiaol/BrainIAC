@@ -7,7 +7,6 @@ from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, Resized, NormalizeIntensityd, EnsureTyped
 )
 from monai.inferers import sliding_window_inference
-from monai.data import decollate_batch
 
 
 from segmentation_model import ViTUNETRSegmentationModel
@@ -75,8 +74,13 @@ def generate_segmentation(model, image_tensor, config):
     pred = torch.sigmoid(pred)
     pred = (pred > 0.5).float()
     
-    # decollate into a list of tensors
-    pred = decollate_batch(pred)[0]
+    # Single-image inference path: avoid decollate_batch because MetaTensor metadata
+    # handling can fail across MONAI/PyTorch versions.
+    # Expected shape after inference: [B, C, D, H, W] with B=1, C=1.
+    if pred.ndim == 5 and pred.shape[0] == 1:
+        pred = pred[0]
+    if pred.ndim == 4 and pred.shape[0] == 1:
+        pred = pred[0]
     return pred
 
 
