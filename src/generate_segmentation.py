@@ -8,7 +8,6 @@ from monai.transforms import (
 )
 from monai.inferers import sliding_window_inference
 from monai.data import decollate_batch
-from monai.savers import NiftiSaver
 
 
 from segmentation_model import ViTUNETRSegmentationModel
@@ -77,30 +76,33 @@ def save_segmentation(segmentation_tensor, meta_dict, output_path):
     """
     Saves the segmentation mask to a file.
     """
-   
-    saver = NiftiSaver(output_dir=os.path.dirname(output_path), 
-                       output_postfix="", 
-                       output_ext=".nii.gz",
-                       separate_folder=False)
-    
-    # add chanel dim if not present 
-    if len(segmentation_tensor.shape) == 3:
-        segmentation_tensor = segmentation_tensor.unsqueeze(0)
+    def _to_numpy(value):
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
 
-   
-    saver.save(segmentation_tensor, meta_dict)
-    
-   
-    original_filename = os.path.basename(meta_dict.get('filename_or_obj', 'segmentation'))
-   
-    original_filename_no_ext = original_filename.split('.')[0]
-    
-    saved_path = os.path.join(os.path.dirname(output_path), f"{original_filename_no_ext}.nii.gz")
-    
-   
-    if os.path.exists(output_path):
-        os.remove(output_path)
-    os.rename(saved_path, output_path)
+    # Expected shapes: [D,H,W], [1,D,H,W], or [C,D,H,W]. Save first channel only.
+    seg_np = _to_numpy(segmentation_tensor)
+    if seg_np.ndim == 4:
+        seg_np = seg_np[0]
+    elif seg_np.ndim != 3:
+        raise ValueError(f"Unexpected segmentation shape: {seg_np.shape}")
+    seg_np = seg_np.astype(np.uint8)
+
+    affine = meta_dict.get("affine")
+    if affine is None:
+        affine = meta_dict.get("original_affine")
+    if affine is None:
+        affine = np.eye(4, dtype=np.float32)
+    else:
+        affine = _to_numpy(affine)
+        if affine.ndim == 3:
+            affine = affine[0]
+        if affine.shape != (4, 4):
+            affine = np.eye(4, dtype=np.float32)
+
+    nii = nib.Nifti1Image(seg_np, affine)
+    nib.save(nii, output_path)
     print(f"Segmentation saved to: {output_path}")
 
 
