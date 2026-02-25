@@ -11,7 +11,7 @@ def get_segmentation_dataloader(csv_file, img_size, batch_size, num_workers, is_
     ]
     if is_train:
         transforms = Compose([
-            LoadImaged(keys=['image', 'label']),
+            LoadImaged(keys=['image', 'label'], image_only=False),
             EnsureChannelFirstd(keys=['image', 'label']),
             Resized(keys=['image', 'label'], spatial_size=img_size, mode=('trilinear', 'nearest')),
             NormalizeIntensityd(keys='image', nonzero=True, channel_wise=True),
@@ -25,7 +25,7 @@ def get_segmentation_dataloader(csv_file, img_size, batch_size, num_workers, is_
         ])
     else:
         transforms = Compose([
-            LoadImaged(keys=['image', 'label']),
+            LoadImaged(keys=['image', 'label'], image_only=False),
             EnsureChannelFirstd(keys=['image', 'label']),
             Resized(keys=['image', 'label'], spatial_size=img_size, mode=('trilinear', 'nearest')),
             NormalizeIntensityd(keys='image', nonzero=True, channel_wise=True),

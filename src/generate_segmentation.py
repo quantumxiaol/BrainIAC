@@ -40,7 +40,7 @@ def preprocess_image(image_path, config):
     
     # val transforms 
     transforms = Compose([
-        LoadImaged(keys=['image']),
+        LoadImaged(keys=['image'], image_only=False),
         EnsureChannelFirstd(keys=['image']),
         Resized(keys=['image'], spatial_size=img_size, mode='trilinear'),
         NormalizeIntensityd(keys='image', nonzero=True, channel_wise=True),
@@ -48,7 +48,15 @@ def preprocess_image(image_path, config):
     ])
     
     data = transforms({'image': image_path})
-    return data['image'].unsqueeze(0).cuda(), data['image_meta_dict']
+    meta_dict = data.get("image_meta_dict")
+    if meta_dict is None:
+        # MONAI version compatibility: some versions don't emit image_meta_dict.
+        nii = nib.load(image_path)
+        meta_dict = {
+            "affine": nii.affine,
+            "filename_or_obj": image_path,
+        }
+    return data['image'].unsqueeze(0).cuda(), meta_dict
 
 def generate_segmentation(model, image_tensor, config):
     """
