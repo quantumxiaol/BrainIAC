@@ -1,8 +1,26 @@
 import pandas as pd
+import numpy as np
 from monai.data import CacheDataset
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, EnsureTyped, Resized, NormalizeIntensityd, RandFlipd, RandRotated, Rand3DElasticd, RandBiasFieldd, RandGaussianNoised, ToTensord
 )
+import monai.transforms.transform as monai_transform
+import monai.utils.misc as monai_misc
+
+
+def _patch_monai_max_seed_for_numpy2() -> None:
+    """
+    MONAI<=1.3.x may use MAX_SEED=2**32, which overflows with newer NumPy
+    in random state plumbing. Clamp to uint32 max to keep behavior stable.
+    """
+    max_uint32 = int(np.iinfo(np.uint32).max)  # 4294967295
+    if getattr(monai_transform, "MAX_SEED", max_uint32) > max_uint32:
+        monai_transform.MAX_SEED = max_uint32
+    if getattr(monai_misc, "MAX_SEED", max_uint32) > max_uint32:
+        monai_misc.MAX_SEED = max_uint32
+
+
+_patch_monai_max_seed_for_numpy2()
 
 def get_segmentation_dataloader(csv_file, img_size, batch_size, num_workers, is_train=True):
     df = pd.read_csv(csv_file)
