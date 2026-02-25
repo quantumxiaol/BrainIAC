@@ -14,3 +14,6 @@ results/
 .env
 
 src/checkpoints/
+src/data/csvs/
+wandb/
+scripts/isles2022_segmentation.yml
