@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import shutil
 import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Iterable
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
@@ -56,31 +58,50 @@ def download_file(url: str, work_dir: Path, timeout: int = 60) -> Path:
     direct_url = to_direct_download_url(url)
     req = Request(direct_url, headers={"User-Agent": "BrainIAC-checkpoint-downloader/1.0"})
 
-    with urlopen(req, timeout=timeout) as response:
-        file_name = guess_download_name(response, direct_url)
-        output_path = work_dir / file_name
-        total_raw = response.headers.get("Content-Length")
-        total = int(total_raw) if total_raw and total_raw.isdigit() else None
-        downloaded = 0
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            file_name = guess_download_name(response, direct_url)
+            output_path = work_dir / file_name
+            total_raw = response.headers.get("Content-Length")
+            total = int(total_raw) if total_raw and total_raw.isdigit() else None
+            downloaded = 0
 
-        print(f"Downloading from: {direct_url}")
-        with output_path.open("wb") as f:
-            while True:
-                chunk = response.read(CHUNK_SIZE)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    percent = downloaded / total * 100
-                    sys.stdout.write(
-                        f"\rDownloaded {human_size(downloaded)} / {human_size(total)} ({percent:5.1f}%)"
-                    )
-                    sys.stdout.flush()
-                elif downloaded % (20 * CHUNK_SIZE) < CHUNK_SIZE:
-                    sys.stdout.write(f"\rDownloaded {human_size(downloaded)}")
-                    sys.stdout.flush()
-        sys.stdout.write("\n")
+            print(f"Downloading from: {direct_url}")
+            with output_path.open("wb") as f:
+                while True:
+                    chunk = response.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total:
+                        percent = downloaded / total * 100
+                        sys.stdout.write(
+                            f"\rDownloaded {human_size(downloaded)} / {human_size(total)} ({percent:5.1f}%)"
+                        )
+                        sys.stdout.flush()
+                    elif downloaded % (20 * CHUNK_SIZE) < CHUNK_SIZE:
+                        sys.stdout.write(f"\rDownloaded {human_size(downloaded)}")
+                        sys.stdout.flush()
+            sys.stdout.write("\n")
+    except HTTPError as err:
+        raise RuntimeError(
+            f"Download failed with HTTP {err.code}. "
+            "The link may be expired, permission-gated, or temporarily unavailable."
+        ) from err
+    except URLError as err:
+        reason = getattr(err, "reason", err)
+        if isinstance(reason, OSError) and getattr(reason, "errno", None) == 101:
+            detail = "Network is unreachable on this machine."
+        elif isinstance(reason, socket.timeout):
+            detail = f"Connection timed out after {timeout}s."
+        else:
+            detail = str(reason)
+        raise RuntimeError(
+            f"Download failed: {detail}\n"
+            "If this environment cannot access the internet, download the archive on another machine "
+            "and run with --archive /path/to/checkpoints.zip."
+        ) from err
 
     return output_path
 
@@ -223,7 +244,11 @@ def main() -> int:
                 print(f"Error: local archive not found: {archive_path}", file=sys.stderr)
                 return 1
         else:
-            archive_path = download_file(args.url, work_dir, timeout=args.timeout)
+            try:
+                archive_path = download_file(args.url, work_dir, timeout=args.timeout)
+            except RuntimeError as err:
+                print(f"Error: {err}", file=sys.stderr)
+                return 1
             downloaded = True
 
         if downloaded and args.keep_archive:
