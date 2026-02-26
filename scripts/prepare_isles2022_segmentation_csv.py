@@ -17,6 +17,7 @@ class CaseRecord:
     case_id: str
     session_id: str
     image_path: Path
+    image_path2: Path | None
     mask_path: Path
 
 
@@ -32,10 +33,10 @@ class DiscoverStats:
     skipped_examples: list[str] = field(default_factory=list)
 
 
-Modality = Literal["flair", "dwi", "adc"]
+Modality = Literal["flair", "dwi", "adc", "dwi_adc"]
 
 
-def _find_modality_image(subj_dir: Path, case_id: str, session_id: str, modality: Modality) -> Path | None:
+def _find_single_image(subj_dir: Path, case_id: str, session_id: str, modality: Literal["flair", "dwi", "adc"]) -> Path | None:
     if modality == "flair":
         subdir = "anat"
         suffix = "FLAIR"
@@ -46,7 +47,7 @@ def _find_modality_image(subj_dir: Path, case_id: str, session_id: str, modality
         subdir = "dwi"
         suffix = "adc"
     else:
-        raise ValueError(f"Unsupported modality: {modality}")
+        raise ValueError(f"Unsupported single modality: {modality}")
 
     seq_dir = subj_dir / session_id / subdir
     exact = seq_dir / f"{case_id}_{session_id}_{suffix}.nii.gz"
@@ -105,7 +106,12 @@ def discover_isles_cases(
         for ses_dir in ses_dirs:
             stats.total_sessions += 1
             session_id = ses_dir.name
-            image_path = _find_modality_image(subj_dir, case_id, session_id, modality)
+            image_path2: Path | None = None
+            if modality == "dwi_adc":
+                image_path = _find_single_image(subj_dir, case_id, session_id, "dwi")
+                image_path2 = _find_single_image(subj_dir, case_id, session_id, "adc")
+            else:
+                image_path = _find_single_image(subj_dir, case_id, session_id, modality)
             mask = _find_mask(derivatives_root, case_id, session_id)
             case_key = f"{case_id}/{session_id}"
 
@@ -113,6 +119,11 @@ def discover_isles_cases(
                 stats.missing_image += 1
                 if len(stats.skipped_examples) < 10:
                     stats.skipped_examples.append(f"{case_key}: missing {modality}")
+                continue
+            if modality == "dwi_adc" and (not image_path2 or not image_path2.exists()):
+                stats.missing_image += 1
+                if len(stats.skipped_examples) < 10:
+                    stats.skipped_examples.append(f"{case_key}: missing adc")
                 continue
             if not mask or not mask.exists():
                 stats.missing_mask += 1
@@ -128,6 +139,13 @@ def discover_isles_cases(
                         if len(stats.skipped_examples) < 10:
                             stats.skipped_examples.append(f"{case_key}: {reason}")
                         continue
+                    if image_path2 is not None:
+                        aligned2, reason2 = _spatially_aligned(image_path2, mask, affine_atol=affine_atol)
+                        if not aligned2:
+                            stats.misaligned += 1
+                            if len(stats.skipped_examples) < 10:
+                                stats.skipped_examples.append(f"{case_key}: adc {reason2}")
+                            continue
                 if drop_empty_mask and _is_empty_mask(mask):
                     stats.empty_mask += 1
                     if len(stats.skipped_examples) < 10:
@@ -144,6 +162,7 @@ def discover_isles_cases(
                     case_id=case_id,
                     session_id=session_id,
                     image_path=image_path.resolve(),
+                    image_path2=image_path2.resolve() if image_path2 is not None else None,
                     mask_path=mask.resolve(),
                 )
             )
@@ -190,7 +209,7 @@ def write_csv(path: Path, cases: list[CaseRecord], relative_to: Path | None = No
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["case_id", "session_id", "image_path", "mask_path"],
+            fieldnames=["case_id", "session_id", "image_path", "image_path2", "mask_path"],
         )
         writer.writeheader()
         for c in cases:
@@ -199,6 +218,7 @@ def write_csv(path: Path, cases: list[CaseRecord], relative_to: Path | None = No
                     "case_id": c.case_id,
                     "session_id": c.session_id,
                     "image_path": _to_str(c.image_path, relative_to),
+                    "image_path2": _to_str(c.image_path2, relative_to) if c.image_path2 is not None else "",
                     "mask_path": _to_str(c.mask_path, relative_to),
                 }
             )
@@ -223,9 +243,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42, help="Random seed for split.")
     parser.add_argument(
         "--modality",
-        choices=["flair", "dwi", "adc"],
-        default="dwi",
-        help="Image modality used for segmentation training. ISLES masks are usually aligned to DWI/ADC space.",
+        choices=["flair", "dwi", "adc", "dwi_adc"],
+        default="dwi_adc",
+        help="Image modality used for segmentation training. Use dwi_adc for early-fusion two-channel input.",
     )
     parser.add_argument(
         "--allow-misaligned",

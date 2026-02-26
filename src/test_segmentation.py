@@ -6,11 +6,12 @@ import torchvision
 torchvision.disable_beta_transforms_warning()
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from monai.metrics import DiceMetric, MeanIoU, ConfusionMatrixMetric
+from monai.metrics import DiceMetric, MeanIoU
 from monai.transforms import AsDiscrete
 from monai.inferers import sliding_window_inference
-from monai.data import CacheDataset
 import csv
+import numpy as np
+from scipy import ndimage as ndi
 
 # Import from segmentation model
 from dataset_segmentation import get_segmentation_dataloader
@@ -57,6 +58,94 @@ def get_test_dataloader(config, test_csv):
     # spinup dataloader
     return DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 
+def _extract_case_id(batch, fallback_index: int) -> str:
+    meta_keys = ["image_meta_dict", "image_dwi_meta_dict", "image_adc_meta_dict"]
+    for meta_key in meta_keys:
+        if meta_key in batch and "filename_or_obj" in batch[meta_key]:
+            filename = batch[meta_key]["filename_or_obj"][0]
+            return str(filename)
+    return f"case_{fallback_index}"
+
+def _compute_case_lesion_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray, iou_threshold: float = 0.1) -> dict:
+    pred_bin = pred_mask.astype(bool)
+    gt_bin = gt_mask.astype(bool)
+
+    voxel_pred = int(pred_bin.sum())
+    voxel_gt = int(gt_bin.sum())
+    avd_percent = abs(voxel_pred - voxel_gt) / max(voxel_gt, 1) * 100.0
+
+    structure = np.ones((3, 3, 3), dtype=np.uint8)
+    pred_cc, pred_n = ndi.label(pred_bin, structure=structure)
+    gt_cc, gt_n = ndi.label(gt_bin, structure=structure)
+
+    if pred_n == 0 and gt_n == 0:
+        return {
+            "lesion_f1": 1.0,
+            "lesion_precision": 1.0,
+            "lesion_recall": 1.0,
+            "lesion_tp": 0,
+            "lesion_fp": 0,
+            "lesion_fn": 0,
+            "lesion_count_pred": 0,
+            "lesion_count_gt": 0,
+            "lesion_count_diff": 0,
+            "avd_percent": 0.0,
+        }
+
+    pred_sizes = np.bincount(pred_cc.ravel())[1:]
+    gt_sizes = np.bincount(gt_cc.ravel())[1:]
+
+    candidate_matches = []
+    for pred_idx in range(1, pred_n + 1):
+        overlap = gt_cc[pred_cc == pred_idx]
+        overlap = overlap[overlap > 0]
+        if overlap.size == 0:
+            continue
+        gt_ids, inter_counts = np.unique(overlap, return_counts=True)
+        pred_vol = int(pred_sizes[pred_idx - 1])
+        for gt_idx, inter in zip(gt_ids.tolist(), inter_counts.tolist()):
+            gt_vol = int(gt_sizes[gt_idx - 1])
+            union = pred_vol + gt_vol - inter
+            if union <= 0:
+                continue
+            iou = inter / union
+            if iou >= iou_threshold:
+                candidate_matches.append((iou, pred_idx, gt_idx))
+
+    candidate_matches.sort(key=lambda x: x[0], reverse=True)
+    used_pred = set()
+    used_gt = set()
+    tp = 0
+    for _, pred_idx, gt_idx in candidate_matches:
+        if pred_idx in used_pred or gt_idx in used_gt:
+            continue
+        used_pred.add(pred_idx)
+        used_gt.add(gt_idx)
+        tp += 1
+
+    fp = pred_n - tp
+    fn = gt_n - tp
+    lesion_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    lesion_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    lesion_f1 = (
+        2.0 * lesion_precision * lesion_recall / (lesion_precision + lesion_recall)
+        if (lesion_precision + lesion_recall) > 0
+        else 0.0
+    )
+
+    return {
+        "lesion_f1": float(lesion_f1),
+        "lesion_precision": float(lesion_precision),
+        "lesion_recall": float(lesion_recall),
+        "lesion_tp": int(tp),
+        "lesion_fp": int(fp),
+        "lesion_fn": int(fn),
+        "lesion_count_pred": int(pred_n),
+        "lesion_count_gt": int(gt_n),
+        "lesion_count_diff": int(abs(pred_n - gt_n)),
+        "avd_percent": float(avd_percent),
+    }
+
 def evaluate(model, test_loader, config):
     """
     Runs the evaluation loop, calculates metrics, and returns them.
@@ -64,14 +153,25 @@ def evaluate(model, test_loader, config):
     """
     dice_metric = DiceMetric(include_background=False, reduction="mean")
     jaccard_metric = MeanIoU(include_background=False, reduction="mean")
-    cm_metric = ConfusionMatrixMetric(metric_name=["precision", "recall"], include_background=False)
 
     post_pred = AsDiscrete(threshold=0.5)
     post_label = AsDiscrete(threshold=0.5)
 
     per_case_dice = {}
-    per_case_ids = []
-    per_case_scores = []
+    per_case_lesion_f1 = {}
+    per_case_avd_percent = {}
+    per_case_lesion_count_diff = {}
+    per_case_lesion_count_pred = {}
+    per_case_lesion_count_gt = {}
+
+    voxel_tp = 0
+    voxel_fp = 0
+    voxel_fn = 0
+    lesion_tp = 0
+    lesion_fp = 0
+    lesion_fn = 0
+    avd_values = []
+    lesion_count_diffs = []
 
     for batch in tqdm(test_loader, desc="Evaluating"):
         image = batch['image'].cuda()
@@ -93,31 +193,62 @@ def evaluate(model, test_loader, config):
         dice_case = DiceMetric(include_background=False, reduction="mean")
         dice_case(pred, label)
         dice_value = dice_case.aggregate().item()
-        # Get image path or pat_id
-        if 'image_meta_dict' in batch and 'filename_or_obj' in batch['image_meta_dict']:
-            image_id = batch['image_meta_dict']['filename_or_obj'][0]  # batch size 1
-        else:
-            image_id = f"case_{len(per_case_dice)}"
+        image_id = _extract_case_id(batch, fallback_index=len(per_case_dice))
         per_case_dice[image_id] = dice_value
+
+        pred_np = pred[0, 0].detach().cpu().numpy().astype(np.uint8)
+        label_np = label[0, 0].detach().cpu().numpy().astype(np.uint8)
+        lesion_case = _compute_case_lesion_metrics(pred_np, label_np, iou_threshold=0.1)
+        per_case_lesion_f1[image_id] = lesion_case["lesion_f1"]
+        per_case_avd_percent[image_id] = lesion_case["avd_percent"]
+        per_case_lesion_count_diff[image_id] = lesion_case["lesion_count_diff"]
+        per_case_lesion_count_pred[image_id] = lesion_case["lesion_count_pred"]
+        per_case_lesion_count_gt[image_id] = lesion_case["lesion_count_gt"]
+
+        voxel_tp += int(np.logical_and(pred_np == 1, label_np == 1).sum())
+        voxel_fp += int(np.logical_and(pred_np == 1, label_np == 0).sum())
+        voxel_fn += int(np.logical_and(pred_np == 0, label_np == 1).sum())
+        lesion_tp += int(lesion_case["lesion_tp"])
+        lesion_fp += int(lesion_case["lesion_fp"])
+        lesion_fn += int(lesion_case["lesion_fn"])
+        avd_values.append(float(lesion_case["avd_percent"]))
+        lesion_count_diffs.append(float(lesion_case["lesion_count_diff"]))
 
         dice_metric(pred, label)
         jaccard_metric(pred, label)
-        cm_metric(pred, label)
 
     # Aggregate metrics
     dice = dice_metric.aggregate().item()
     jaccard = jaccard_metric.aggregate().item()
-    precision_per_class = cm_metric.aggregate("precision")
-    recall_per_class = cm_metric.aggregate("recall")
-    precision = torch.stack(precision_per_class).mean().item()
-    recall = torch.stack(recall_per_class).mean().item()
+    precision = voxel_tp / (voxel_tp + voxel_fp) if (voxel_tp + voxel_fp) > 0 else 0.0
+    recall = voxel_tp / (voxel_tp + voxel_fn) if (voxel_tp + voxel_fn) > 0 else 0.0
+
+    lesion_precision = lesion_tp / (lesion_tp + lesion_fp) if (lesion_tp + lesion_fp) > 0 else 0.0
+    lesion_recall = lesion_tp / (lesion_tp + lesion_fn) if (lesion_tp + lesion_fn) > 0 else 0.0
+    lesion_f1 = (
+        2.0 * lesion_precision * lesion_recall / (lesion_precision + lesion_recall)
+        if (lesion_precision + lesion_recall) > 0
+        else 0.0
+    )
+    avd_percent = float(np.mean(avd_values)) if avd_values else 0.0
+    lesion_count_diff = float(np.mean(lesion_count_diffs)) if lesion_count_diffs else 0.0
 
     metrics = {
-        "dice": dice,
-        "jaccard": jaccard,
-        "precision": precision,
-        "recall": recall,
-        "per_case_dice": per_case_dice
+        "dice": float(dice),
+        "jaccard": float(jaccard),
+        "precision": float(precision),
+        "recall": float(recall),
+        "lesion_f1": float(lesion_f1),
+        "lesion_precision": float(lesion_precision),
+        "lesion_recall": float(lesion_recall),
+        "avd_percent": float(avd_percent),
+        "lesion_count_diff": float(lesion_count_diff),
+        "per_case_dice": per_case_dice,
+        "per_case_lesion_f1": per_case_lesion_f1,
+        "per_case_avd_percent": per_case_avd_percent,
+        "per_case_lesion_count_diff": per_case_lesion_count_diff,
+        "per_case_lesion_count_pred": per_case_lesion_count_pred,
+        "per_case_lesion_count_gt": per_case_lesion_count_gt,
     }
     return metrics
 
@@ -174,9 +305,29 @@ if __name__ == "__main__":
         csv_path = os.path.join(args.csv_output_dir, f"{experiment_name}_per_case_dice.csv")
         with open(csv_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(["dice"])
-            for dice in metrics["per_case_dice"].values():
-                writer.writerow([dice])
+            writer.writerow(
+                [
+                    "case_id",
+                    "dice",
+                    "lesion_f1",
+                    "avd_percent",
+                    "lesion_count_diff",
+                    "lesion_count_pred",
+                    "lesion_count_gt",
+                ]
+            )
+            for case_id, dice in metrics["per_case_dice"].items():
+                writer.writerow(
+                    [
+                        case_id,
+                        dice,
+                        metrics["per_case_lesion_f1"].get(case_id),
+                        metrics["per_case_avd_percent"].get(case_id),
+                        metrics["per_case_lesion_count_diff"].get(case_id),
+                        metrics["per_case_lesion_count_pred"].get(case_id),
+                        metrics["per_case_lesion_count_gt"].get(case_id),
+                    ]
+                )
         
         
         # Print mean Dice 

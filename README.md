@@ -124,15 +124,20 @@ bash scripts/train_isles2022_segmentation.sh
 ```
 
 Stability note:
-- Default `.env.example` uses `PRECISION=32` and `LR=1e-4` for safer initial runs on ISLES-2022.
+- Default `.env.example` uses `PRECISION=32`, `FREEZE_BACKBONE=no`, `ENCODER_LR=5e-5`, `DECODER_LR=1e-4`.
 - If stable, you can try `PRECISION=16-mixed` for speed.
-- Default `.env.example` uses `IMAGE_MODALITY=dwi` and `REQUIRE_ALIGNED=yes` so image/mask pairs are kept in the same voxel space.
+- Default `.env.example` uses `IMAGE_MODALITY=dwi_adc` (early-fusion 2-channel) and `REQUIRE_ALIGNED=yes` so image/mask pairs are kept in the same voxel space.
 
 Command-line arguments still override `.env`:
 
 ```bash
 bash scripts/train_isles2022_segmentation.sh /data/datasets/ISLES-2022 0
 ```
+
+Segmentation evaluation (`src/test_segmentation.py`) reports:
+- voxel metrics: Dice / IoU / Precision / Recall
+- lesion metrics: lesion-wise F1 / lesion count diff
+- volume metric: AVD (absolute volume difference, %)
 
 
 

@@ -23,6 +23,9 @@ class SegmentationLightningModule(pl.LightningModule):
             in_channels=config['model']['in_channels'],
             out_channels=config['model']['out_channels']
         )
+        # self.model.vit is only a temporary backbone holder used for weight transfer.
+        for param in self.model.vit.parameters():
+            param.requires_grad = False
         self.dice_loss = DiceLoss(sigmoid=True)
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.train_metric = DiceMetric(include_background=False, reduction='mean')
@@ -32,9 +35,6 @@ class SegmentationLightningModule(pl.LightningModule):
         if str(config['training'].get('freeze', 'no')).lower() == "yes":
             # Forward path uses model.unetr; freeze its ViT encoder.
             for param in self.model.unetr.vit.parameters():
-                param.requires_grad = False
-            # Keep the auxiliary ViT branch consistent (not used in forward).
-            for param in self.model.vit.parameters():
                 param.requires_grad = False
             print("ViT encoder weights frozen!!")
     def forward(self, x):
@@ -90,9 +90,33 @@ class SegmentationLightningModule(pl.LightningModule):
         self.val_metric.reset()
     def configure_optimizers(self):
         t = self.config['training']
-       
-        trainable_params = filter(lambda p: p.requires_grad, self.parameters())
-        opt = torch.optim.AdamW(trainable_params, lr=float(t['lr']), weight_decay=float(t['weight_decay']))
+        base_lr = float(t.get('lr', 5e-4))
+        encoder_lr = float(t.get('encoder_lr', base_lr))
+        decoder_lr = float(t.get('decoder_lr', base_lr))
+        weight_decay = float(t.get('weight_decay', 1e-4))
+
+        encoder_params = [p for p in self.model.unetr.vit.parameters() if p.requires_grad]
+        encoder_param_ids = {id(p) for p in encoder_params}
+        decoder_params = [
+            p for p in self.model.unetr.parameters() if p.requires_grad and id(p) not in encoder_param_ids
+        ]
+
+        param_groups = []
+        if decoder_params:
+            param_groups.append({"params": decoder_params, "lr": decoder_lr})
+        if encoder_params:
+            param_groups.append({"params": encoder_params, "lr": encoder_lr})
+        if not param_groups:
+            raise RuntimeError("No trainable parameters found for optimizer.")
+
+        enc_count = sum(p.numel() for p in encoder_params)
+        dec_count = sum(p.numel() for p in decoder_params)
+        print(
+            f"Optimizer param groups: decoder_lr={decoder_lr} ({dec_count} params), "
+            f"encoder_lr={encoder_lr} ({enc_count} params)"
+        )
+
+        opt = torch.optim.AdamW(param_groups, lr=decoder_lr, weight_decay=weight_decay)
         sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=t['max_epochs'], eta_min=1e-6)
         return [opt], [sch]
 

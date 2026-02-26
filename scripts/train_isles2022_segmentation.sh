@@ -23,24 +23,36 @@ SIMCLR_CKPT="${SIMCLR_CKPT:-${REPO_ROOT}/src/checkpoints/BrainIAC.ckpt}"
 TRAIN_RATIO="${TRAIN_RATIO:-0.8}"
 VAL_RATIO="${VAL_RATIO:-0.1}"
 SPLIT_SEED="${SPLIT_SEED:-42}"
-IMAGE_MODALITY="${IMAGE_MODALITY:-dwi}"
+IMAGE_MODALITY="${IMAGE_MODALITY:-dwi_adc}"
 REQUIRE_ALIGNED="${REQUIRE_ALIGNED:-yes}"
 DROP_EMPTY_MASK="${DROP_EMPTY_MASK:-yes}"
 AFFINE_ATOL="${AFFINE_ATOL:-1e-3}"
+MODEL_IN_CHANNELS="${MODEL_IN_CHANNELS:-}"
 
 BATCH_SIZE="${BATCH_SIZE:-4}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 MAX_EPOCHS="${MAX_EPOCHS:-100}"
-LR="${LR:-5e-4}"
+LR="${LR:-1e-4}"
+ENCODER_LR="${ENCODER_LR:-5e-5}"
+DECODER_LR="${DECODER_LR:-1e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 SW_BATCH_SIZE="${SW_BATCH_SIZE:-2}"
 PRECISION="${PRECISION:-32}"
 ACCUMULATE_GRAD_BATCHES="${ACCUMULATE_GRAD_BATCHES:-1}"
 GRADIENT_CLIP_VAL="${GRADIENT_CLIP_VAL:-1.0}"
 MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
-FREEZE_BACKBONE="${FREEZE_BACKBONE:-yes}"
+FREEZE_BACKBONE="${FREEZE_BACKBONE:-no}"
 RUN_NAME="${RUN_NAME:-isles2022_segmentation}"
 PROJECT_NAME="${PROJECT_NAME:-brainiac_isles2022_segmentation}"
+
+if [[ -z "${MODEL_IN_CHANNELS}" ]]; then
+  image_modality_lc="$(printf '%s' "${IMAGE_MODALITY}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${image_modality_lc}" == "dwi_adc" ]]; then
+    MODEL_IN_CHANNELS="2"
+  else
+    MODEL_IN_CHANNELS="1"
+  fi
+fi
 
 echo "[1/3] Build ISLES split CSVs from: ${ISLES_ROOT} (modality=${IMAGE_MODALITY})"
 
@@ -76,10 +88,13 @@ python "${REPO_ROOT}/scripts/make_isles2022_segmentation_config.py" \
   --output-dir "${OUT_DIR}" \
   --log-dir "${LOG_DIR}" \
   --gpu-device "${GPU_DEVICE}" \
+  --in-channels "${MODEL_IN_CHANNELS}" \
   --batch-size "${BATCH_SIZE}" \
   --num-workers "${NUM_WORKERS}" \
   --max-epochs "${MAX_EPOCHS}" \
   --lr "${LR}" \
+  --encoder-lr "${ENCODER_LR}" \
+  --decoder-lr "${DECODER_LR}" \
   --weight-decay "${WEIGHT_DECAY}" \
   --sw-batch-size "${SW_BATCH_SIZE}" \
   --precision "${PRECISION}" \

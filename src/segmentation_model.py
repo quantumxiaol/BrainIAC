@@ -24,6 +24,30 @@ class ViTUNETRSegmentationModel(nn.Module):
             raise ValueError(
                 f"No backbone.* weights found in checkpoint: {simclr_ckpt_path}"
             )
+        patch_key = "patch_embedding.patch_embeddings.weight"
+        if patch_key in backbone_state_dict:
+            pretrained_patch = backbone_state_dict[patch_key]
+            target_patch = self.vit.state_dict()[patch_key]
+            if pretrained_patch.shape != target_patch.shape:
+                pre_ch = int(pretrained_patch.shape[1])
+                tgt_ch = int(target_patch.shape[1])
+                if pre_ch == 1 and tgt_ch > 1:
+                    # Early-fusion channel inflation (e.g., DWI+ADC): copy RGB-style and keep scale.
+                    backbone_state_dict[patch_key] = pretrained_patch.repeat(1, tgt_ch, 1, 1, 1) / float(tgt_ch)
+                    print(
+                        f"Adapted pretrained patch embedding channels from {pre_ch} to {tgt_ch} "
+                        f"for early-fusion input."
+                    )
+                elif pre_ch > 1 and tgt_ch == 1:
+                    backbone_state_dict[patch_key] = pretrained_patch.mean(dim=1, keepdim=True)
+                    print(
+                        f"Adapted pretrained patch embedding channels from {pre_ch} to {tgt_ch} by averaging."
+                    )
+                else:
+                    raise ValueError(
+                        "Unsupported patch embedding channel mismatch: "
+                        f"pretrained={tuple(pretrained_patch.shape)}, target={tuple(target_patch.shape)}"
+                    )
         self.vit.load_state_dict(backbone_state_dict, strict=True)
         # UNETR decoder
         self.unetr = UNETR(

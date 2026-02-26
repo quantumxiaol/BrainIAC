@@ -31,10 +31,13 @@ def parse_args() -> argparse.Namespace:
         help="Directory where training logs (e.g., wandb local logs) are saved.",
     )
     parser.add_argument("--gpu-device", type=str, default="0")
+    parser.add_argument("--in-channels", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=5e-4)
+    parser.add_argument("--encoder-lr", type=float, default=None)
+    parser.add_argument("--decoder-lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--sw-batch-size", type=int, default=2)
     parser.add_argument(
@@ -82,6 +85,12 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
     output_config.parent.mkdir(parents=True, exist_ok=True)
 
+    if args.in_channels < 1:
+        raise ValueError(f"in-channels must be >=1, got {args.in_channels}")
+
+    encoder_lr = args.encoder_lr if args.encoder_lr is not None else args.lr
+    decoder_lr = args.decoder_lr if args.decoder_lr is not None else args.lr
+
     cfg = {
         "data": {
             "train_csv": str(train_csv),
@@ -89,7 +98,7 @@ def main() -> int:
         },
         "model": {
             "img_size": [96, 96, 96],
-            "in_channels": 1,
+            "in_channels": args.in_channels,
             "out_channels": 1,
         },
         "pretrain": {
@@ -100,6 +109,8 @@ def main() -> int:
             "num_workers": args.num_workers,
             "max_epochs": args.max_epochs,
             "lr": args.lr,
+            "encoder_lr": encoder_lr,
+            "decoder_lr": decoder_lr,
             "weight_decay": args.weight_decay,
             "sw_batch_size": args.sw_batch_size,
             "precision": args.precision,
