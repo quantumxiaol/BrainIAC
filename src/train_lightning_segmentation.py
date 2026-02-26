@@ -30,9 +30,13 @@ class SegmentationLightningModule(pl.LightningModule):
         
         # Freeze backbone if specified
         if str(config['training'].get('freeze', 'no')).lower() == "yes":
+            # Forward path uses model.unetr; freeze its ViT encoder.
+            for param in self.model.unetr.vit.parameters():
+                param.requires_grad = False
+            # Keep the auxiliary ViT branch consistent (not used in forward).
             for param in self.model.vit.parameters():
                 param.requires_grad = False
-            print("ViT backbone weights frozen!!")
+            print("ViT encoder weights frozen!!")
     def forward(self, x):
         return self.model(x)
     def training_step(self, batch, batch_idx):
@@ -42,10 +46,13 @@ class SegmentationLightningModule(pl.LightningModule):
         dice_loss = self.dice_loss(seg, lbl)
         bce_loss = self.bce_loss(seg, lbl)
         loss = dice_loss + bce_loss
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"Non-finite training loss detected at step {self.global_step}: {loss.item()}")
         
-        self.log('train_loss', loss, prog_bar=True)
-        self.log('train_dice_loss', dice_loss, on_step=True, on_epoch=True)
-        self.log('train_bce_loss', bce_loss, on_step=True, on_epoch=True)
+        bsz = int(img.shape[0])
+        self.log('train_loss', loss, prog_bar=True, batch_size=bsz)
+        self.log('train_dice_loss', dice_loss, on_step=True, on_epoch=True, batch_size=bsz)
+        self.log('train_bce_loss', bce_loss, on_step=True, on_epoch=True, batch_size=bsz)
 
         preds = torch.sigmoid(seg) > 0.5
         self.train_metric(y_pred=preds, y=lbl)
@@ -66,10 +73,13 @@ class SegmentationLightningModule(pl.LightningModule):
         dice_loss = self.dice_loss(seg, lbl)
         bce_loss = self.bce_loss(seg, lbl)
         loss = dice_loss + bce_loss
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"Non-finite validation loss detected at step {self.global_step}: {loss.item()}")
 
-        self.log('val_loss', loss, prog_bar=True, sync_dist=True)
-        self.log('val_dice_loss', dice_loss, sync_dist=True)
-        self.log('val_bce_loss', bce_loss, sync_dist=True)
+        bsz = int(img.shape[0])
+        self.log('val_loss', loss, prog_bar=True, sync_dist=True, batch_size=bsz)
+        self.log('val_dice_loss', dice_loss, sync_dist=True, batch_size=bsz)
+        self.log('val_bce_loss', bce_loss, sync_dist=True, batch_size=bsz)
 
         preds = torch.sigmoid(seg) > 0.5
         self.val_metric(y_pred=preds, y=lbl)
@@ -112,7 +122,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+    train_cfg = config.get('training', {})
     os.environ['CUDA_VISIBLE_DEVICES'] = config['gpu']['visible_device']
+    torch.set_float32_matmul_precision(str(train_cfg.get('matmul_precision', 'high')))
     wandb_logger = WandbLogger(
         project=config['logger']['project_name'],
         name=config['logger']['run_name'],
@@ -135,7 +147,8 @@ if __name__ == "__main__":
         accelerator='gpu',
         devices=1,
         strategy='auto',
-        precision="16-mixed",
-        gradient_clip_val=1.0
+        precision=train_cfg.get('precision', "16-mixed"),
+        gradient_clip_val=float(train_cfg.get('gradient_clip_val', 1.0)),
+        accumulate_grad_batches=int(train_cfg.get('accumulate_grad_batches', 1)),
     )
     trainer.fit(model, train_loader, val_loader) 

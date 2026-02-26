@@ -38,6 +38,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--sw-batch-size", type=int, default=2)
     parser.add_argument(
+        "--precision",
+        type=str,
+        default="32",
+        help='Lightning precision, e.g. "32", "16-mixed", "bf16-mixed".',
+    )
+    parser.add_argument("--accumulate-grad-batches", type=int, default=1)
+    parser.add_argument("--gradient-clip-val", type=float, default=1.0)
+    parser.add_argument(
+        "--matmul-precision",
+        choices=["highest", "high", "medium"],
+        default="high",
+        help="torch.set_float32_matmul_precision value.",
+    )
+    parser.add_argument(
         "--freeze-backbone",
         choices=["yes", "no"],
         default="yes",
@@ -88,7 +102,10 @@ def main() -> int:
             "lr": args.lr,
             "weight_decay": args.weight_decay,
             "sw_batch_size": args.sw_batch_size,
-            "accumulate_grad_batches": 1,
+            "precision": args.precision,
+            "accumulate_grad_batches": args.accumulate_grad_batches,
+            "gradient_clip_val": args.gradient_clip_val,
+            "matmul_precision": args.matmul_precision,
             "freeze": args.freeze_backbone,
         },
         "output": {

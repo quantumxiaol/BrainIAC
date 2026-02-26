@@ -30,6 +30,10 @@ MAX_EPOCHS="${MAX_EPOCHS:-100}"
 LR="${LR:-5e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-1e-4}"
 SW_BATCH_SIZE="${SW_BATCH_SIZE:-2}"
+PRECISION="${PRECISION:-32}"
+ACCUMULATE_GRAD_BATCHES="${ACCUMULATE_GRAD_BATCHES:-1}"
+GRADIENT_CLIP_VAL="${GRADIENT_CLIP_VAL:-1.0}"
+MATMUL_PRECISION="${MATMUL_PRECISION:-high}"
 FREEZE_BACKBONE="${FREEZE_BACKBONE:-yes}"
 RUN_NAME="${RUN_NAME:-isles2022_segmentation}"
 PROJECT_NAME="${PROJECT_NAME:-brainiac_isles2022_segmentation}"
@@ -57,6 +61,10 @@ python "${REPO_ROOT}/scripts/make_isles2022_segmentation_config.py" \
   --lr "${LR}" \
   --weight-decay "${WEIGHT_DECAY}" \
   --sw-batch-size "${SW_BATCH_SIZE}" \
+  --precision "${PRECISION}" \
+  --accumulate-grad-batches "${ACCUMULATE_GRAD_BATCHES}" \
+  --gradient-clip-val "${GRADIENT_CLIP_VAL}" \
+  --matmul-precision "${MATMUL_PRECISION}" \
   --freeze-backbone "${FREEZE_BACKBONE}" \
   --run-name "${RUN_NAME}" \
   --project-name "${PROJECT_NAME}"

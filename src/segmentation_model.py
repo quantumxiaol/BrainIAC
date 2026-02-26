@@ -20,6 +20,10 @@ class ViTUNETRSegmentationModel(nn.Module):
         ckpt = torch.load(simclr_ckpt_path, map_location='cpu')
         state_dict = ckpt.get('state_dict', ckpt)
         backbone_state_dict = {k[9:]: v for k, v in state_dict.items() if k.startswith('backbone.')}
+        if not backbone_state_dict:
+            raise ValueError(
+                f"No backbone.* weights found in checkpoint: {simclr_ckpt_path}"
+            )
         self.vit.load_state_dict(backbone_state_dict, strict=True)
         # UNETR decoder
         self.unetr = UNETR(
@@ -37,8 +41,8 @@ class ViTUNETRSegmentationModel(nn.Module):
         
         # Transfer ViT weights to UNETR encoder
         self.unetr.vit.load_state_dict(self.vit.state_dict(), strict=True)
-        print("="*10)
-        print("ViT loaded from scratch")
-        print("="*10)
+        print("=" * 10)
+        print(f"Loaded pretrained ViT encoder from: {simclr_ckpt_path}")
+        print("=" * 10)
     def forward(self, x):
-        return self.unetr(x) 
+        return self.unetr(x)
