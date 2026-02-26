@@ -4,8 +4,12 @@ from __future__ import annotations
 import argparse
 import csv
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
+
+import nibabel as nib
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -16,12 +20,39 @@ class CaseRecord:
     mask_path: Path
 
 
-def _find_flair(subj_dir: Path, case_id: str, session_id: str) -> Path | None:
-    anat_dir = subj_dir / session_id / "anat"
-    exact = anat_dir / f"{case_id}_{session_id}_FLAIR.nii.gz"
+@dataclass
+class DiscoverStats:
+    total_sessions: int = 0
+    selected_cases: int = 0
+    missing_image: int = 0
+    missing_mask: int = 0
+    misaligned: int = 0
+    empty_mask: int = 0
+    load_error: int = 0
+    skipped_examples: list[str] = field(default_factory=list)
+
+
+Modality = Literal["flair", "dwi", "adc"]
+
+
+def _find_modality_image(subj_dir: Path, case_id: str, session_id: str, modality: Modality) -> Path | None:
+    if modality == "flair":
+        subdir = "anat"
+        suffix = "FLAIR"
+    elif modality == "dwi":
+        subdir = "dwi"
+        suffix = "dwi"
+    elif modality == "adc":
+        subdir = "dwi"
+        suffix = "adc"
+    else:
+        raise ValueError(f"Unsupported modality: {modality}")
+
+    seq_dir = subj_dir / session_id / subdir
+    exact = seq_dir / f"{case_id}_{session_id}_{suffix}.nii.gz"
     if exact.exists():
         return exact
-    candidates = sorted(anat_dir.glob(f"{case_id}_{session_id}_*FLAIR*.nii.gz"))
+    candidates = sorted(seq_dir.glob(f"{case_id}_{session_id}_*{suffix}*.nii.gz"))
     return candidates[0] if candidates else None
 
 
@@ -36,9 +67,34 @@ def _find_mask(derivatives_root: Path, case_id: str, session_id: str) -> Path | 
     return candidates[0] if candidates else None
 
 
-def discover_isles_cases(isles_root: Path) -> tuple[list[CaseRecord], list[str]]:
+def _spatially_aligned(image_path: Path, mask_path: Path, affine_atol: float) -> tuple[bool, str]:
+    image_obj = nib.load(str(image_path))
+    mask_obj = nib.load(str(mask_path))
+    image_shape = tuple(int(v) for v in image_obj.shape[:3])
+    mask_shape = tuple(int(v) for v in mask_obj.shape[:3])
+
+    if image_shape != mask_shape:
+        return False, f"shape mismatch image={image_shape} mask={mask_shape}"
+    if not np.allclose(image_obj.affine, mask_obj.affine, atol=affine_atol, rtol=0.0):
+        return False, "affine mismatch"
+    return True, ""
+
+
+def _is_empty_mask(mask_path: Path) -> bool:
+    mask_obj = nib.load(str(mask_path))
+    data = np.asarray(mask_obj.dataobj)
+    return float(data.max()) <= 0.0
+
+
+def discover_isles_cases(
+    isles_root: Path,
+    modality: Modality,
+    require_aligned: bool,
+    drop_empty_mask: bool,
+    affine_atol: float,
+) -> tuple[list[CaseRecord], DiscoverStats]:
     cases: list[CaseRecord] = []
-    missing: list[str] = []
+    stats = DiscoverStats()
     derivatives_root = isles_root / "derivatives"
 
     for subj_dir in sorted(isles_root.glob("sub-strokecase*")):
@@ -47,21 +103,53 @@ def discover_isles_cases(isles_root: Path) -> tuple[list[CaseRecord], list[str]]
         case_id = subj_dir.name
         ses_dirs = sorted(p for p in subj_dir.glob("ses-*") if p.is_dir())
         for ses_dir in ses_dirs:
+            stats.total_sessions += 1
             session_id = ses_dir.name
-            flair = _find_flair(subj_dir, case_id, session_id)
+            image_path = _find_modality_image(subj_dir, case_id, session_id, modality)
             mask = _find_mask(derivatives_root, case_id, session_id)
-            if flair and mask and flair.exists() and mask.exists():
-                cases.append(
-                    CaseRecord(
-                        case_id=case_id,
-                        session_id=session_id,
-                        image_path=flair.resolve(),
-                        mask_path=mask.resolve(),
-                    )
+            case_key = f"{case_id}/{session_id}"
+
+            if not image_path or not image_path.exists():
+                stats.missing_image += 1
+                if len(stats.skipped_examples) < 10:
+                    stats.skipped_examples.append(f"{case_key}: missing {modality}")
+                continue
+            if not mask or not mask.exists():
+                stats.missing_mask += 1
+                if len(stats.skipped_examples) < 10:
+                    stats.skipped_examples.append(f"{case_key}: missing mask")
+                continue
+
+            try:
+                if require_aligned:
+                    aligned, reason = _spatially_aligned(image_path, mask, affine_atol=affine_atol)
+                    if not aligned:
+                        stats.misaligned += 1
+                        if len(stats.skipped_examples) < 10:
+                            stats.skipped_examples.append(f"{case_key}: {reason}")
+                        continue
+                if drop_empty_mask and _is_empty_mask(mask):
+                    stats.empty_mask += 1
+                    if len(stats.skipped_examples) < 10:
+                        stats.skipped_examples.append(f"{case_key}: empty mask")
+                    continue
+            except Exception as exc:
+                stats.load_error += 1
+                if len(stats.skipped_examples) < 10:
+                    stats.skipped_examples.append(f"{case_key}: load error ({exc})")
+                continue
+
+            cases.append(
+                CaseRecord(
+                    case_id=case_id,
+                    session_id=session_id,
+                    image_path=image_path.resolve(),
+                    mask_path=mask.resolve(),
                 )
-            else:
-                missing.append(f"{case_id}/{session_id}")
-    return cases, missing
+            )
+
+    stats.selected_cases = len(cases)
+    return cases, stats
 
 
 def _safe_counts(total: int, train_ratio: float, val_ratio: float) -> tuple[int, int, int]:
@@ -134,6 +222,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-ratio", type=float, default=0.1, help="Validation split ratio.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for split.")
     parser.add_argument(
+        "--modality",
+        choices=["flair", "dwi", "adc"],
+        default="dwi",
+        help="Image modality used for segmentation training. ISLES masks are usually aligned to DWI/ADC space.",
+    )
+    parser.add_argument(
+        "--allow-misaligned",
+        action="store_true",
+        help="Allow image/mask pairs with mismatched spatial metadata (not recommended).",
+    )
+    parser.add_argument(
+        "--keep-empty-mask",
+        action="store_true",
+        help="Keep cases where mask contains only zeros.",
+    )
+    parser.add_argument(
+        "--affine-atol",
+        type=float,
+        default=1e-3,
+        help="Absolute tolerance for affine comparison when checking spatial alignment.",
+    )
+    parser.add_argument(
         "--relative-paths",
         action="store_true",
         help="Store paths relative to current working directory instead of absolute paths.",
@@ -154,11 +264,19 @@ def main() -> int:
     if args.train_ratio + args.val_ratio >= 1.0:
         raise ValueError("train-ratio + val-ratio must be < 1.0")
 
-    cases, missing = discover_isles_cases(isles_root)
+    require_aligned = not args.allow_misaligned
+    drop_empty_mask = not args.keep_empty_mask
+    cases, stats = discover_isles_cases(
+        isles_root=isles_root,
+        modality=args.modality,
+        require_aligned=require_aligned,
+        drop_empty_mask=drop_empty_mask,
+        affine_atol=args.affine_atol,
+    )
     if not cases:
         raise RuntimeError(
             f"No valid ISLES cases found under: {isles_root}. "
-            "Expected FLAIR at sub-*/ses-*/anat/*_FLAIR.nii.gz and mask at derivatives/sub-*/ses-*/*_msk.nii.gz"
+            f"Expected modality '{args.modality}' and masks at derivatives/sub-*/ses-*/*_msk.nii.gz"
         )
 
     train_cases, val_cases, test_cases = split_cases(
@@ -173,10 +291,21 @@ def main() -> int:
     write_csv(val_csv, val_cases, relative_to=rel_base)
     write_csv(test_csv, test_cases, relative_to=rel_base)
 
-    print(f"Discovered valid cases: {len(cases)}")
-    print(f"Missing FLAIR/mask cases skipped: {len(missing)}")
-    if missing:
-        print("First 10 skipped:", ", ".join(missing[:10]))
+    print(f"Modality: {args.modality}")
+    print(f"Spatial alignment required: {require_aligned} (affine_atol={args.affine_atol})")
+    print(f"Drop empty masks: {drop_empty_mask}")
+    print(f"Discovered sessions: {stats.total_sessions}")
+    print(f"Selected valid cases: {stats.selected_cases}")
+    print(
+        "Skipped counts:"
+        f" missing_image={stats.missing_image},"
+        f" missing_mask={stats.missing_mask},"
+        f" misaligned={stats.misaligned},"
+        f" empty_mask={stats.empty_mask},"
+        f" load_error={stats.load_error}"
+    )
+    if stats.skipped_examples:
+        print("First skipped examples:", ", ".join(stats.skipped_examples))
     print(f"Train/Val/Test: {len(train_cases)}/{len(val_cases)}/{len(test_cases)}")
     print(f"train_csv: {train_csv}")
     print(f"val_csv:   {val_csv}")

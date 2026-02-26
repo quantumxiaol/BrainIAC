@@ -23,6 +23,10 @@ SIMCLR_CKPT="${SIMCLR_CKPT:-${REPO_ROOT}/src/checkpoints/BrainIAC.ckpt}"
 TRAIN_RATIO="${TRAIN_RATIO:-0.8}"
 VAL_RATIO="${VAL_RATIO:-0.1}"
 SPLIT_SEED="${SPLIT_SEED:-42}"
+IMAGE_MODALITY="${IMAGE_MODALITY:-dwi}"
+REQUIRE_ALIGNED="${REQUIRE_ALIGNED:-yes}"
+DROP_EMPTY_MASK="${DROP_EMPTY_MASK:-yes}"
+AFFINE_ATOL="${AFFINE_ATOL:-1e-3}"
 
 BATCH_SIZE="${BATCH_SIZE:-4}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
@@ -38,13 +42,30 @@ FREEZE_BACKBONE="${FREEZE_BACKBONE:-yes}"
 RUN_NAME="${RUN_NAME:-isles2022_segmentation}"
 PROJECT_NAME="${PROJECT_NAME:-brainiac_isles2022_segmentation}"
 
-echo "[1/3] Build ISLES split CSVs from: ${ISLES_ROOT}"
-python "${REPO_ROOT}/scripts/prepare_isles2022_segmentation_csv.py" \
-  --isles-root "${ISLES_ROOT}" \
-  --output-dir "${CSV_DIR}" \
-  --train-ratio "${TRAIN_RATIO}" \
-  --val-ratio "${VAL_RATIO}" \
+echo "[1/3] Build ISLES split CSVs from: ${ISLES_ROOT} (modality=${IMAGE_MODALITY})"
+
+prepare_cmd=(
+  python "${REPO_ROOT}/scripts/prepare_isles2022_segmentation_csv.py"
+  --isles-root "${ISLES_ROOT}"
+  --output-dir "${CSV_DIR}"
+  --train-ratio "${TRAIN_RATIO}"
+  --val-ratio "${VAL_RATIO}"
   --seed "${SPLIT_SEED}"
+  --modality "${IMAGE_MODALITY}"
+  --affine-atol "${AFFINE_ATOL}"
+)
+
+require_aligned_lc="$(printf '%s' "${REQUIRE_ALIGNED}" | tr '[:upper:]' '[:lower:]')"
+drop_empty_mask_lc="$(printf '%s' "${DROP_EMPTY_MASK}" | tr '[:upper:]' '[:lower:]')"
+
+if [[ "${require_aligned_lc}" != "yes" ]]; then
+  prepare_cmd+=(--allow-misaligned)
+fi
+if [[ "${drop_empty_mask_lc}" != "yes" ]]; then
+  prepare_cmd+=(--keep-empty-mask)
+fi
+
+"${prepare_cmd[@]}"
 
 echo "[2/3] Generate segmentation config: ${CFG_PATH}"
 python "${REPO_ROOT}/scripts/make_isles2022_segmentation_config.py" \

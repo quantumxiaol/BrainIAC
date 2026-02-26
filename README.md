@@ -126,6 +126,7 @@ bash scripts/train_isles2022_segmentation.sh
 Stability note:
 - Default `.env.example` uses `PRECISION=32` and `LR=1e-4` for safer initial runs on ISLES-2022.
 - If stable, you can try `PRECISION=16-mixed` for speed.
+- Default `.env.example` uses `IMAGE_MODALITY=dwi` and `REQUIRE_ALIGNED=yes` so image/mask pairs are kept in the same voxel space.
 
 Command-line arguments still override `.env`:
 
