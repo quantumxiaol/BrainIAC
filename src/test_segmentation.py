@@ -6,8 +6,6 @@ import torchvision
 torchvision.disable_beta_transforms_warning()
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from monai.metrics import DiceMetric, MeanIoU
-from monai.transforms import AsDiscrete
 from monai.inferers import sliding_window_inference
 import csv
 import numpy as np
@@ -58,6 +56,20 @@ def get_test_dataloader(config, test_csv):
     # spinup dataloader
     return DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
 
+def _parse_thresholds(threshold_str: str) -> list[float]:
+    values = []
+    for item in threshold_str.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        t = float(token)
+        if not (0.0 < t < 1.0):
+            raise ValueError(f"Threshold must be in (0, 1), got: {t}")
+        values.append(t)
+    if not values:
+        raise ValueError("No valid thresholds parsed from --sweep-thresholds.")
+    return sorted(set(values))
+
 def _extract_case_id(batch, fallback_index: int) -> str:
     meta_keys = ["image_meta_dict", "image_dwi_meta_dict", "image_adc_meta_dict"]
     for meta_key in meta_keys:
@@ -65,6 +77,49 @@ def _extract_case_id(batch, fallback_index: int) -> str:
             filename = batch[meta_key]["filename_or_obj"][0]
             return str(filename)
     return f"case_{fallback_index}"
+
+def _postprocess_prediction(prob_map: np.ndarray, threshold: float, min_lesion_voxels: int) -> np.ndarray:
+    pred_bin = (prob_map >= threshold).astype(np.uint8)
+    if min_lesion_voxels <= 0:
+        return pred_bin
+    if pred_bin.max() == 0:
+        return pred_bin
+
+    structure = np.ones((3, 3, 3), dtype=np.uint8)
+    pred_cc, pred_n = ndi.label(pred_bin.astype(bool), structure=structure)
+    if pred_n == 0:
+        return pred_bin
+
+    sizes = np.bincount(pred_cc.ravel())
+    keep_mask = np.isin(pred_cc, np.where(sizes >= min_lesion_voxels)[0])
+    keep_mask[pred_cc == 0] = False
+    return keep_mask.astype(np.uint8)
+
+def _collect_predictions(model, loader, config, desc="Evaluating"):
+    cases = []
+    for batch in tqdm(loader, desc=desc):
+        image = batch["image"].cuda()
+        label = batch["label"].cuda()
+
+        pred_logits = sliding_window_inference(
+            inputs=image,
+            roi_size=tuple(config["model"]["img_size"]),
+            sw_batch_size=config["training"]["sw_batch_size"],
+            predictor=model,
+            overlap=0.5,
+        )
+        pred_prob = torch.sigmoid(pred_logits)
+        label_bin = (label > 0.5).to(torch.uint8)
+
+        case_id = _extract_case_id(batch, fallback_index=len(cases))
+        cases.append(
+            {
+                "case_id": case_id,
+                "pred_prob": pred_prob[0, 0].detach().cpu().numpy().astype(np.float32),
+                "label": label_bin[0, 0].detach().cpu().numpy().astype(np.uint8),
+            }
+        )
+    return cases
 
 def _compute_case_lesion_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray, iou_threshold: float = 0.1) -> dict:
     pred_bin = pred_mask.astype(bool)
@@ -146,17 +201,13 @@ def _compute_case_lesion_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray, iou
         "avd_percent": float(avd_percent),
     }
 
-def evaluate(model, test_loader, config):
-    """
-    Runs the evaluation loop, calculates metrics, and returns them.
-    Also records per-case Dice scores.
-    """
-    dice_metric = DiceMetric(include_background=False, reduction="mean")
-    jaccard_metric = MeanIoU(include_background=False, reduction="mean")
+def _safe_div(num: float, den: float, empty_value: float = 0.0) -> float:
+    return float(num / den) if den > 0 else float(empty_value)
 
-    post_pred = AsDiscrete(threshold=0.5)
-    post_label = AsDiscrete(threshold=0.5)
-
+def evaluate_cases(cases, threshold: float, min_lesion_voxels: int):
+    """
+    Computes voxel/lesion metrics from cached prediction probabilities and labels.
+    """
     per_case_dice = {}
     per_case_lesion_f1 = {}
     per_case_avd_percent = {}
@@ -172,32 +223,25 @@ def evaluate(model, test_loader, config):
     lesion_fn = 0
     avd_values = []
     lesion_count_diffs = []
+    per_case_dice_values = []
 
-    for batch in tqdm(test_loader, desc="Evaluating"):
-        image = batch['image'].cuda()
-        label = batch['label'].cuda()
-
-        pred = sliding_window_inference(
-            inputs=image,
-            roi_size=tuple(config['model']['img_size']),
-            sw_batch_size=config['training']['sw_batch_size'],
-            predictor=model,
-            overlap=0.5
+    for case in cases:
+        image_id = case["case_id"]
+        label_np = case["label"]
+        pred_np = _postprocess_prediction(
+            prob_map=case["pred_prob"],
+            threshold=threshold,
+            min_lesion_voxels=min_lesion_voxels,
         )
 
-        pred = torch.sigmoid(pred)
-        pred = post_pred(pred)
-        label = post_label(label)
+        tp = int(np.logical_and(pred_np == 1, label_np == 1).sum())
+        fp = int(np.logical_and(pred_np == 1, label_np == 0).sum())
+        fn = int(np.logical_and(pred_np == 0, label_np == 1).sum())
+        dice_den = 2 * tp + fp + fn
+        case_dice = _safe_div(2 * tp, dice_den, empty_value=1.0)
+        per_case_dice_values.append(case_dice)
+        per_case_dice[image_id] = case_dice
 
-        # Per-case Dice (single case per batch)
-        dice_case = DiceMetric(include_background=False, reduction="mean")
-        dice_case(pred, label)
-        dice_value = dice_case.aggregate().item()
-        image_id = _extract_case_id(batch, fallback_index=len(per_case_dice))
-        per_case_dice[image_id] = dice_value
-
-        pred_np = pred[0, 0].detach().cpu().numpy().astype(np.uint8)
-        label_np = label[0, 0].detach().cpu().numpy().astype(np.uint8)
         lesion_case = _compute_case_lesion_metrics(pred_np, label_np, iou_threshold=0.1)
         per_case_lesion_f1[image_id] = lesion_case["lesion_f1"]
         per_case_avd_percent[image_id] = lesion_case["avd_percent"]
@@ -205,26 +249,23 @@ def evaluate(model, test_loader, config):
         per_case_lesion_count_pred[image_id] = lesion_case["lesion_count_pred"]
         per_case_lesion_count_gt[image_id] = lesion_case["lesion_count_gt"]
 
-        voxel_tp += int(np.logical_and(pred_np == 1, label_np == 1).sum())
-        voxel_fp += int(np.logical_and(pred_np == 1, label_np == 0).sum())
-        voxel_fn += int(np.logical_and(pred_np == 0, label_np == 1).sum())
+        voxel_tp += tp
+        voxel_fp += fp
+        voxel_fn += fn
         lesion_tp += int(lesion_case["lesion_tp"])
         lesion_fp += int(lesion_case["lesion_fp"])
         lesion_fn += int(lesion_case["lesion_fn"])
         avd_values.append(float(lesion_case["avd_percent"]))
         lesion_count_diffs.append(float(lesion_case["lesion_count_diff"]))
 
-        dice_metric(pred, label)
-        jaccard_metric(pred, label)
-
     # Aggregate metrics
-    dice = dice_metric.aggregate().item()
-    jaccard = jaccard_metric.aggregate().item()
-    precision = voxel_tp / (voxel_tp + voxel_fp) if (voxel_tp + voxel_fp) > 0 else 0.0
-    recall = voxel_tp / (voxel_tp + voxel_fn) if (voxel_tp + voxel_fn) > 0 else 0.0
+    dice = _safe_div(2 * voxel_tp, (2 * voxel_tp + voxel_fp + voxel_fn), empty_value=1.0)
+    jaccard = _safe_div(voxel_tp, (voxel_tp + voxel_fp + voxel_fn), empty_value=1.0)
+    precision = _safe_div(voxel_tp, (voxel_tp + voxel_fp))
+    recall = _safe_div(voxel_tp, (voxel_tp + voxel_fn))
 
-    lesion_precision = lesion_tp / (lesion_tp + lesion_fp) if (lesion_tp + lesion_fp) > 0 else 0.0
-    lesion_recall = lesion_tp / (lesion_tp + lesion_fn) if (lesion_tp + lesion_fn) > 0 else 0.0
+    lesion_precision = _safe_div(lesion_tp, (lesion_tp + lesion_fp))
+    lesion_recall = _safe_div(lesion_tp, (lesion_tp + lesion_fn))
     lesion_f1 = (
         2.0 * lesion_precision * lesion_recall / (lesion_precision + lesion_recall)
         if (lesion_precision + lesion_recall) > 0
@@ -232,9 +273,11 @@ def evaluate(model, test_loader, config):
     )
     avd_percent = float(np.mean(avd_values)) if avd_values else 0.0
     lesion_count_diff = float(np.mean(lesion_count_diffs)) if lesion_count_diffs else 0.0
+    mean_case_dice = float(np.mean(per_case_dice_values)) if per_case_dice_values else 0.0
 
     metrics = {
         "dice": float(dice),
+        "mean_case_dice": float(mean_case_dice),
         "jaccard": float(jaccard),
         "precision": float(precision),
         "recall": float(recall),
@@ -262,10 +305,20 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint_path', type=str, required=True, help="Path to checkpoint file")
     parser.add_argument('--experiment_name', type=str, required=False, default="segmentation_task", help="Name for the experiment")
     parser.add_argument('--csv_output_dir', type=str, required=False, default="./inference/per_case_results", help="Directory to save per-case CSV files")
+    parser.add_argument('--threshold', type=float, default=0.5, help="Probability threshold for binarizing prediction.")
+    parser.add_argument('--min_lesion_voxels', type=int, default=0, help="Remove predicted connected components smaller than this size.")
+    parser.add_argument('--sweep_thresholds', type=str, default="", help="Comma-separated thresholds, e.g. '0.3,0.4,0.5,0.6'.")
+    parser.add_argument('--sweep_csv', type=str, default="", help="CSV for threshold sweep (recommended: validation CSV).")
+    parser.add_argument('--sweep_metric', type=str, default="dice", choices=["dice", "lesion_f1"], help="Metric used to pick best threshold.")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+
+    if not (0.0 < args.threshold < 1.0):
+        raise ValueError(f"--threshold must be in (0,1), got: {args.threshold}")
+    if args.min_lesion_voxels < 0:
+        raise ValueError(f"--min_lesion_voxels must be >=0, got: {args.min_lesion_voxels}")
 
     os.environ["CUDA_VISIBLE_DEVICES"] = config['gpu']['visible_device']
 
@@ -280,11 +333,12 @@ if __name__ == "__main__":
         exit()
         
     
-    os.makedirs(os.path.dirname(args.output_json), exist_ok=True)
+    output_json_dir = os.path.dirname(args.output_json)
+    if output_json_dir:
+        os.makedirs(output_json_dir, exist_ok=True)
     os.makedirs(args.csv_output_dir, exist_ok=True)
 
     all_metrics = {}
-    test_loader = get_test_dataloader(config, args.test_csv)
 
     # store results 
     mean_dice_scores = {}
@@ -296,10 +350,50 @@ if __name__ == "__main__":
 
         print(f" Evaluating : '{experiment_name}' ")
         model = load_model(config, ckpt_path)
-        metrics = evaluate(model, test_loader, config)
+
+        selected_threshold = float(args.threshold)
+        sweep_results = []
+        if args.sweep_thresholds.strip():
+            sweep_thresholds = _parse_thresholds(args.sweep_thresholds)
+            sweep_csv = args.sweep_csv.strip() or config.get("data", {}).get("val_csv", "")
+            if not sweep_csv:
+                raise ValueError("--sweep_thresholds provided but no sweep CSV found. Set --sweep_csv or config.data.val_csv.")
+            print(
+                f"Sweeping thresholds on: {sweep_csv} | thresholds={sweep_thresholds} | "
+                f"metric={args.sweep_metric} | min_lesion_voxels={args.min_lesion_voxels}"
+            )
+            sweep_loader = get_test_dataloader(config, sweep_csv)
+            sweep_cases = _collect_predictions(model, sweep_loader, config, desc="Collecting sweep predictions")
+            for threshold in sweep_thresholds:
+                sweep_metrics = evaluate_cases(
+                    sweep_cases,
+                    threshold=threshold,
+                    min_lesion_voxels=args.min_lesion_voxels,
+                )
+                score = float(sweep_metrics[args.sweep_metric])
+                sweep_results.append({"threshold": threshold, "score": score})
+                print(f"  threshold={threshold:.3f} {args.sweep_metric}={score:.4f}")
+            best_item = max(sweep_results, key=lambda x: x["score"])
+            selected_threshold = float(best_item["threshold"])
+            print(f"Selected threshold={selected_threshold:.3f} by {args.sweep_metric}={best_item['score']:.4f}")
+
+        test_loader = get_test_dataloader(config, args.test_csv)
+        test_cases = _collect_predictions(model, test_loader, config, desc="Collecting test predictions")
+        metrics = evaluate_cases(
+            test_cases,
+            threshold=selected_threshold,
+            min_lesion_voxels=args.min_lesion_voxels,
+        )
+        metrics["postprocess"] = {
+            "threshold": selected_threshold,
+            "min_lesion_voxels": int(args.min_lesion_voxels),
+        }
+        if sweep_results:
+            metrics["threshold_sweep"] = sweep_results
         
         all_metrics[experiment_name] = metrics
-        print(f"Metrics for '{experiment_name}': {metrics}")
+        summary = {k: v for k, v in metrics.items() if not k.startswith("per_case_") and k != "threshold_sweep"}
+        print(f"Metrics summary for '{experiment_name}': {summary}")
 
         # --- Save per-case Dice to CSV ---
         csv_path = os.path.join(args.csv_output_dir, f"{experiment_name}_per_case_dice.csv")
@@ -314,6 +408,8 @@ if __name__ == "__main__":
                     "lesion_count_diff",
                     "lesion_count_pred",
                     "lesion_count_gt",
+                    "threshold",
+                    "min_lesion_voxels",
                 ]
             )
             for case_id, dice in metrics["per_case_dice"].items():
@@ -326,12 +422,14 @@ if __name__ == "__main__":
                         metrics["per_case_lesion_count_diff"].get(case_id),
                         metrics["per_case_lesion_count_pred"].get(case_id),
                         metrics["per_case_lesion_count_gt"].get(case_id),
+                        metrics["postprocess"]["threshold"],
+                        metrics["postprocess"]["min_lesion_voxels"],
                     ]
                 )
         
         
         # Print mean Dice 
-        mean_dice = sum(metrics["per_case_dice"].values()) / len(metrics["per_case_dice"])
+        mean_dice = metrics["mean_case_dice"]
         mean_dice_scores[experiment_name] = mean_dice
         print(f"Mean Dice for '{experiment_name}': {mean_dice:.4f}")
 

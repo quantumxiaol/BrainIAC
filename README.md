@@ -138,6 +138,34 @@ Segmentation evaluation (`src/test_segmentation.py`) reports:
 - voxel metrics: Dice / IoU / Precision / Recall
 - lesion metrics: lesion-wise F1 / lesion count diff
 - volume metric: AVD (absolute volume difference, %)
+- post-processing controls: `--threshold` (default `0.5`), `--min_lesion_voxels` (remove tiny connected components)
+- threshold sweep: `--sweep_thresholds` + `--sweep_csv` (auto pick best threshold on validation CSV)
+
+Example (fixed threshold + small-lesion filtering):
+
+```bash
+python src/test_segmentation.py \
+  --config scripts/isles2022_segmentation.yml \
+  --test_csv src/data/csvs/isles2022/isles2022_test.csv \
+  --checkpoint_path /path/to/best.ckpt \
+  --experiment_name isles2022_dwi_adc_post \
+  --threshold 0.45 \
+  --min_lesion_voxels 20
+```
+
+Example (auto threshold selection on validation CSV):
+
+```bash
+python src/test_segmentation.py \
+  --config scripts/isles2022_segmentation.yml \
+  --test_csv src/data/csvs/isles2022/isles2022_test.csv \
+  --checkpoint_path /path/to/best.ckpt \
+  --experiment_name isles2022_dwi_adc_sweep \
+  --sweep_csv src/data/csvs/isles2022/isles2022_val.csv \
+  --sweep_thresholds 0.30,0.35,0.40,0.45,0.50 \
+  --sweep_metric lesion_f1 \
+  --min_lesion_voxels 20
+```
 
 
 
