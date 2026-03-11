@@ -84,6 +84,53 @@ ln -sf os_model.pt os.ckpt
 ln -sf sequence_classifcation.ckpt multiclass.ckpt
 ```
 
+## MCP Service (Single-Patient Infarct Segmentation)
+
+An MCP server is available at `src/mcp-service/server.py` with one tool:
+- `segment_infarct_single_patient(patient_image_path)`
+
+Input:
+- `patient_image_path`: absolute path to one `.nii`/`.nii.gz` patient image file
+
+Output:
+- absolute path to the generated segmentation mask
+
+Default checkpoints/output:
+- segmentation checkpoint: `src/checkpoints/segmentation.ckpt`
+- BrainIAC backbone checkpoint: `src/checkpoints/BrainIAC.ckpt`
+- output dir: `inference/mcp_outputs`
+- HTTP host/port (when using `--http`): `127.0.0.1:8001`
+
+The server auto-loads project-root `.env` (if present), so server-side deployment is easiest with:
+
+```bash
+cp .env.example .env
+# edit .env
+```
+
+You can also override by exporting env vars:
+
+```bash
+export BRAINIAC_SEGMENTATION_CKPT=/abs/path/to/segmentation.ckpt
+export BRAINIAC_SIMCLR_CKPT=/abs/path/to/BrainIAC.ckpt
+export BRAINIAC_OUTPUT_DIR=/abs/path/to/output_dir
+export BRAINIAC_GPU_DEVICE=0
+export BRAINIAC_MCP_HOST=127.0.0.1
+export BRAINIAC_MCP_PORT=8001
+```
+
+Start MCP server (STDIO, for local agent process):
+
+```bash
+python src/mcp-service/server.py
+```
+
+Start MCP server (HTTP + SSE + streamable-http):
+
+```bash
+python src/mcp-service/server.py --http --host 127.0.0.1 --port 8001
+```
+
 ## Testing
 
 Basic tests (fast, no heavy model inference):

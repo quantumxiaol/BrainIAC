@@ -7,7 +7,7 @@ name = "brainiac"
 version = "0.1.0"
 description = "BrainIAC pipelines for generalized structural brain MRI analysis."
 readme = "README.md"
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.10,<3.13"
 license = { file = "LICENSE" }
 dependencies = [
   "autograd>=1.7",
@@ -32,6 +32,8 @@ dependencies = [
   "torchvision>=0.15",
   "tqdm>=4.66",
   "wandb>=0.17",
+  "mcp>=1.26.0",
+  "mcp-server>=0.1.4",
 ]
 
 [project.optional-dependencies]
