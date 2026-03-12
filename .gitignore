@@ -8,6 +8,7 @@ wheels/
 
 logs/
 results/
+inference/
 
 # Virtual environments
 .venv

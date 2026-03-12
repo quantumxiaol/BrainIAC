@@ -131,6 +131,26 @@ Start MCP server (HTTP + SSE + streamable-http):
 python src/mcp-service/server.py --http --host 127.0.0.1 --port 8001
 ```
 
+Run MCP server in background with `tmux`:
+
+```bash
+# 1) Create detached tmux session
+tmux new-session -d -s brainiac-mcp
+
+# 2) Start MCP service in that session (and write logs)
+tmux send-keys -t brainiac-mcp 'cd ~/BrainIAC && source .venv/bin/activate && mkdir -p logs && python src/mcp-service/server.py --http --host 127.0.0.1 --port 8001 |& tee logs/mcp_server.log' C-m
+
+# 3) Check running sessions
+tmux ls
+
+# 4) Attach to session for live logs
+tmux attach -t brainiac-mcp
+# Detach without stopping: Ctrl-b then d
+
+# 5) Stop MCP service/session
+tmux kill-session -t brainiac-mcp
+```
+
 ## Testing
 
 Basic tests (fast, no heavy model inference):
